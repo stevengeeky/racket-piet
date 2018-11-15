@@ -10,6 +10,10 @@ Base implementation by stevengeeky (https://github.com/stevengeeky) and mofas (h
 
 Make a new `example.rkt` file and in DrRacket type
 
-`#lang racket-piet`
+```scheme
+#lang racket-piet
 
-![hello-world.png](examples/hello-world.rkt)
+codal-size 11
+```
+
+![hello-world.png](https://raw.githubusercontent.com/stevengeeky/racket-piet/master/examples/hello-world.png)
