@@ -4,7 +4,7 @@ Base implementation by stevengeeky (https://github.com/stevengeeky) and mofas (h
 
 ## Installation
 
-`raco pkg install https://github.com/stevengeeky/racket-piet`
+`raco pkg install https://github.com/stevengeeky/racket-piet.git`
 
 ## Usage
 
