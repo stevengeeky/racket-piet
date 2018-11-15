@@ -1057,7 +1057,7 @@
                                         (with-codal-size codal-size x-datum))))
                  (append compiled-img (loop codal-size #f))]
                 [_ (raise-syntax-error 'read-syntax "value given is not an image" #f #f (list x))])))))
-    #`(module whatever piet (#%module-begin #,@compiled)))
+    #`(module whatever racket-piet (#%module-begin #,@compiled)))
 
   (provide (rename-out [my-read-syntax read-syntax])))
 
