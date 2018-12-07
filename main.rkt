@@ -1252,7 +1252,7 @@
                 [`(define (,name ,xs ...) ,b)
                  (set-member? calls name)]))
             defs)
-         ,e)]))
+         (let ([_ ,e]) (void)))]))
 
   ;; shrink an image by an influence of 1/codal-size
   (define (with-codal-size size img)
