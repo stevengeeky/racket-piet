@@ -1097,10 +1097,25 @@
       [`(begin ,(app recur xs) ...) `(begin ,@xs)]
       [`(printf . ,xs) `(printf ,@xs)]
       [`(list ,(app recur xs) ...) `(list ,@xs)]
-      [`(block-loop ,dp ,cc ,stack ,b)
-       (if (and (constant? (recur dp)) (constant? (recur cc)))
-           (recur b)
-           `(block-loop ,(recur dp) ,(recur cc) ,(recur stack) ,(recur b)))]
+      [`(block-loop ,(app recur dp) ,(app recur cc) ,stack ,b)
+       (if (and (constant? dp) (constant? cc))
+           #;(recur b)
+           (let ([where-to-next #f]
+                 [dp (constant->value dp)]
+                 [cc (constant->value cc)])
+             (begin
+               (for ([i (in-range 8)])
+                 #:break where-to-next
+                 (let ([potential
+                        (do-restrained-inlining
+                         b (extend-env (extend-env env 'cc cc) 'dp dp) g-env)])
+                   (if (not (equal? potential ''return))
+                       (set! where-to-next potential)
+                       (if (even? i)
+                           (set! cc (modulo (add1 cc) 2))
+                           (set! dp (modulo (add1 dp) 4))))))
+               (if where-to-next where-to-next '(void))))
+           `(block-loop ,dp ,cc ,(recur stack) ,b))]
       [`(match ,(app recur l) ,clauses ...)
        #:when (constant? l)
        (define l^ (constant->value l))
