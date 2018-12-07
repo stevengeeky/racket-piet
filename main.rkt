@@ -4,7 +4,13 @@
   (provide compile compile/with-debugging with-codal-size run-program
            program->instr-list instr-list->racket
            optimize-program->instr-list
-           optimize-instr-list->racket)
+           optimize-instr-list->racket
+           restrained-inlining
+           remove-unnecessary-defs
+           noop +s /s >s dup in-char
+           push -s %s pointer rolls
+           out-num pop *s nots switch
+           in-num out-char)
   (require 2htdp/image)
   (require (for-syntax syntax/parse racket/match
                        racket/set racket/list
@@ -408,7 +414,7 @@
         (let ([hue-diff (hue-sub (col-hue new-codal) (col-hue codal))]
               [light-diff (light-sub (col-lightness new-codal) (col-lightness codal))])
           (match (list hue-diff light-diff)
-            [`(0 0 ,_) 'noop]
+            [`(0 0) 'noop]
             [`(1 0) '+s]
             [`(2 0) '/s]
             [`(3 0) '>s]
@@ -561,67 +567,68 @@
   ;; that value, this function returns #t for deterministic program flow
   (define (maybe-optimize-instruction instr size dp cc stack)
     (match (list instr stack)
-      [`(noop ,_) (values #t stack dp cc)]
-      [`(+s (Just ((Just ,a) (Just ,b) . ,rest))) (values #t `(Just ((Just ,(+ b a)) . ,rest)) dp cc)]
-      [`(+s (Just (,-a ,-b . ,rest))) (values #t `(Just ((Var ,(gensym 'x) (+ ,-a ,-b)) . ,rest)) dp cc)]
-      [`(+s ,-stack) (values #t `(Var ,(gensym 'x) (cons (cons (+ (cadr ,-stack) (car ,-stack)) (cddr ,-stack)))) dp cc)]
+      [`(noop ,_) (values #f #f #t stack dp cc)]
+      [`(+s (Just ((Just ,a) (Just ,b) . ,rest))) (values (+ b a) 2 #t `(Just ((Just ,(+ b a)) . ,rest)) dp cc)]
+      [`(+s (Just (,-a ,-b . ,rest))) (values #f #f #t `(Just ((Var ,(gensym 'x) (+ ,-a ,-b)) . ,rest)) dp cc)]
+      [`(+s ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (cons (+ (cadr ,-stack) (car ,-stack)) (cddr ,-stack)))) dp cc)]
       [`(/s (Just ((Just ,a) (Just ,b) . ,rest)))
        #:when (not (zero? a))
        (define rem (modulo b a))
        (define res (if (zero? rem) (/ b a) (/ (- b rem) a)))
-       (values #t `(Just ((Just ,res) . ,rest)) dp cc)]
+       (values res #t 2 `(Just ((Just ,res) . ,rest)) dp cc)]
       [`(/s (Just (,-a ,-b . ,rest)))
-       (values #t `(Just ((Var ,(gensym 'x) (/ ,-a ,-b)) . ,rest)) dp cc)]
-      [`(/s ,-stack) (values #t `(Var ,(gensym 'x) (cons (/ (cadr ,-stack) (car ,-stack)) (cddr ,-stack))) dp cc)]
+       (values #f #f #t `(Just ((Var ,(gensym 'x) (/ ,-a ,-b)) . ,rest)) dp cc)]
+      [`(/s ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (/ (cadr ,-stack) (car ,-stack)) (cddr ,-stack))) dp cc)]
       [`(>s (Just ((Just ,a) (Just ,b) . ,rest)))
        (define res (if (> b a) 1 0))
-       (values #t `(Just ((Just ,res) . ,rest)) dp cc)]
-      [`(>s (Just (,-a ,-b . ,rest))) (values #t `(Just ((Var ,(gensym 'x) (> ,-a ,-b)) . ,rest)) dp cc)]
-      [`(>s ,-stack) (values #t `(Var ,(gensym 'x) (cons (> (cadr ,-stack) (car ,-stack)) (cddr ,-stack))) dp cc)]
-      [`(dup (Just ((Just ,a) . ,rest))) (values #t `(Just ((Just ,a) (Just ,a) . ,rest)) dp cc)]
-      [`(dup (Just (,-a . ,rest))) (values #t `(Just (,-a ,-a . ,rest)) dp cc)]
-      [`(dup ,-stack) (values #t `(Var ,(gensym 'x) (cons (car ,-stack) (cons (car ,-stack) (cdr ,-stack)))) dp cc)]
-      [`(in-char (Just ,stack)) (values #t `(Just ((Var ,(gensym 'x) (in-char)) . ,stack)) dp cc)]
-      [`(in-char ,-stack) (values #t `(Var ,(gensym 'x) (cons (in-char) ,-stack)) dp cc)]
-      [`(push (Just ,stack)) (values #t `(Just ((Just ,size) . ,stack)) dp cc)]
-      [`(push ,-stack) (values #t `(Var ,(gensym 'x) (cons ,size ,-stack)) dp cc)]
-      [`(-s (Just ((Just ,a) (Just ,b) . ,rest))) (values #t `(Just ((Just ,(- b a)) . ,rest)) dp cc)]
-      [`(-s (Just (,-a ,-b . ,rest))) (values #t `(Just ((Var ,(gensym 'x) (- ,-a ,-b)) . ,rest)) dp cc)]
-      [`(-s ,-stack) (values #t `(Var ,(gensym 'x) (cons (cons (- (cadr ,-stack) (car ,-stack)) (cddr ,-stack)))) dp cc)]
+       (values res 2 #t `(Just ((Just ,res) . ,rest)) dp cc)]
+      [`(>s (Just (,-a ,-b . ,rest))) (values #f #f #t `(Just ((Var ,(gensym 'x) (> ,-a ,-b)) . ,rest)) dp cc)]
+      [`(>s ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (> (cadr ,-stack) (car ,-stack)) (cddr ,-stack))) dp cc)]
+      [`(dup (Just ((Just ,a) . ,rest))) (values a 0 #t `(Just ((Just ,a) (Just ,a) . ,rest)) dp cc)]
+      [`(dup (Just (,-a . ,rest))) (values #f #f #t `(Just (,-a ,-a . ,rest)) dp cc)]
+      [`(dup ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (car ,-stack) (cons (car ,-stack) (cdr ,-stack)))) dp cc)]
+      [`(in-char (Just ,stack))
+       (values #f #f #t `(Just ((Var ,(gensym 'x) (in-char)) . ,stack)) dp cc)]
+      [`(in-char ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (in-char) ,-stack)) dp cc)]
+      [`(push (Just ,stack)) (values size 0 #t `(Just ((Just ,size) . ,stack)) dp cc)]
+      [`(push ,-stack) (values size 0 #t `(Var ,(gensym 'x) (cons ,size ,-stack)) dp cc)]
+      [`(-s (Just ((Just ,a) (Just ,b) . ,rest))) (values (- b a) 2 #t `(Just ((Just ,(- b a)) . ,rest)) dp cc)]
+      [`(-s (Just (,-a ,-b . ,rest))) (values #f #f #t `(Just ((Var ,(gensym 'x) (- ,-a ,-b)) . ,rest)) dp cc)]
+      [`(-s ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (cons (- (cadr ,-stack) (car ,-stack)) (cddr ,-stack)))) dp cc)]
       [`(%s (Just ((Just ,a) (Just ,b) . ,rest)))
        #:when (not (zero? a))
-       (values #t `(Just ((Just ,(modulo b a)) . ,rest)) dp cc)]
-      [`(%s (Just (,-a ,-b . ,rest))) (values #t `(Just ((Var ,(gensym 'x) (% ,-a ,-b)) . ,rest)) dp cc)]
-      [`(%s ,-stack) (values #t `(Var ,(gensym 'x) (cons (cons (% (cadr ,-stack) (car ,-stack)) (cddr ,-stack)))) dp cc)]
-      [`(pointer (Just ((Just ,a) . ,rest))) (values #f `(Just ,rest) (modulo (+ dp a) 4) cc)]
-      [`(pointer (Just (,-a . ,rest))) (values #f `(Just ,rest) dp cc)]
-      [`(pointer ,-stack) (values #f `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
+       (values (modulo b a) 2 #t `(Just ((Just ,(modulo b a)) . ,rest)) dp cc)]
+      [`(%s (Just (,-a ,-b . ,rest))) (values #f #f #t `(Just ((Var ,(gensym 'x) (% ,-a ,-b)) . ,rest)) dp cc)]
+      [`(%s ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (cons (% (cadr ,-stack) (car ,-stack)) (cddr ,-stack)))) dp cc)]
+      [`(pointer (Just ((Just ,a) . ,rest))) (values #f #f #f `(Just ,rest) (modulo (+ dp a) 4) cc)]
+      [`(pointer (Just (,-a . ,rest))) (values #f #f #f `(Just ,rest) dp cc)]
+      [`(pointer ,-stack) (values #f #f #f `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
       [`(rolls (Just ((Just ,n) (Just ,d) . ,rest)))
        #:when (not (zero? d))
-       (values #t `(Just ,(roll rest n d)) dp cc)]
-      [`(rolls (Just (,-a ,-b . ,rest))) (values #t `(Var ,(gensym 'x) (roll ,-a ,-b ,rest)) dp cc)]
-      [`(rolls ,-stack) (values #t `(Var ,(gensym 'x) (roll (car ,-stack) (cadr ,-stack) (cddr ,-stack))) dp cc)]
-      [`(out-num (Just (,_ . ,rest))) (values #t `(Just ,rest) dp cc)]
-      [`(out-num ,-stack) (values #t `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
-      [`(pop (Just ((Just ,a) . ,rest))) (values #t `(Just ,rest) dp cc)]
-      [`(pop (Just (,-a . ,rest))) (values #t `(Just ,rest) dp cc)]
-      [`(pop ,-stack) (values #t `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
-      [`(*s (Just ((Just ,a) (Just ,b) . ,rest))) (values #t `(Just ((Just ,(* b a)) . ,rest)) dp cc)]
-      [`(*s (Just (,-a ,-b . ,rest))) (values #t `(Just ((Var ,(gensym 'x) (* ,-a ,-b)) . ,rest)) dp cc)]
-      [`(*s ,-stack) (values #t `(Var ,(gensym 'x) (cons (* (cadr ,-stack) (car ,-stack)) (cddr ,-stack))) dp cc)]
+       (values #f #f #t `(Just ,(roll rest n d)) dp cc)]
+      [`(rolls (Just (,-a ,-b . ,rest))) (values #f #f #t `(Var ,(gensym 'x) (roll ,-a ,-b ,rest)) dp cc)]
+      [`(rolls ,-stack) (values #f #f #t `(Var ,(gensym 'x) (roll (car ,-stack) (cadr ,-stack) (cddr ,-stack))) dp cc)]
+      [`(out-num (Just (,_ . ,rest))) (values #f #f #t `(Just ,rest) dp cc)]
+      [`(out-num ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
+      [`(pop (Just ((Just ,a) . ,rest))) (values #f 1 #t `(Just ,rest) dp cc)]
+      [`(pop (Just (,-a . ,rest))) (values #f #f #t `(Just ,rest) dp cc)]
+      [`(pop ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
+      [`(*s (Just ((Just ,a) (Just ,b) . ,rest))) (values (* b a) #f #t `(Just ((Just ,(* b a)) . ,rest)) dp cc)]
+      [`(*s (Just (,-a ,-b . ,rest))) (values #f #f #t `(Just ((Var ,(gensym 'x) (* ,-a ,-b)) . ,rest)) dp cc)]
+      [`(*s ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (* (cadr ,-stack) (car ,-stack)) (cddr ,-stack))) dp cc)]
       [`(nots (Just ((Just ,a) . ,rest)))
        (define res (if a 0 1))
-       (values #t `(Just ((Just ,res) . ,rest)) dp cc)]
-      [`(nots (Just (,-a . ,rest))) (values #t `(Just ((Just (Var ,(gensym 'x) (not ,-a))) .  ,rest)) dp cc)]
-      [`(nots ,-stack) (values #t `(Var ,(gensym 'x) (cons (not (car ,-stack)) (cdr ,-stack))) dp cc)]
-      [`(switch (Just ((Just ,a) . ,rest))) (values #f `(Just ,rest) dp (modulo (+ cc a) 2))]
-      [`(switch (Just (,-a . ,rest))) (values #f `(Just ,rest) dp cc)]
-      [`(switch ,-stack) (values #f `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
-      [`(in-num (Just ,stack)) (values #t `(Just ((Var ,(gensym 'x) (in-num)) . ,stack)) dp cc)]
-      [`(in-num ,-stack) (values #t `(Var ,(gensym 'x) (cons (in-num) ,-stack)) dp cc)]
-      [`(out-char (Just (,_ . ,rest))) (values #t `(Just ,rest) dp cc)]
-      [`(out-char ,-stack) (values #t `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
-      [_ (values #f stack dp cc)]))
+       (values res #f #t `(Just ((Just ,res) . ,rest)) dp cc)]
+      [`(nots (Just (,-a . ,rest))) (values #f #f #t `(Just ((Just (Var ,(gensym 'x) (not ,-a))) .  ,rest)) dp cc)]
+      [`(nots ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (not (car ,-stack)) (cdr ,-stack))) dp cc)]
+      [`(switch (Just ((Just ,a) . ,rest))) (values #f #f #f `(Just ,rest) dp (modulo (+ cc a) 2))]
+      [`(switch (Just (,-a . ,rest))) (values #f #f #f `(Just ,rest) dp cc)]
+      [`(switch ,-stack) (values #f #f #f `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
+      [`(in-num (Just ,stack)) (values #f #f #t `(Just ((Var ,(gensym 'x) (in-num)) . ,stack)) dp cc)]
+      [`(in-num ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cons (in-num) ,-stack)) dp cc)]
+      [`(out-char (Just (,_ . ,rest))) (values #f #f #t `(Just ,rest) dp cc)]
+      [`(out-char ,-stack) (values #f #f #t `(Var ,(gensym 'x) (cdr ,-stack)) dp cc)]
+      [_ (values #f #f #f stack dp cc)]))
 
   ;; program->instr-list, generating only necessary instructions
   ;; when the program flow is deterministic
@@ -685,7 +692,7 @@
                                                    color-value
                                                    #f)]
                                        [possible-instr (compute-possible-instr codal new-codal)])
-                                  (let-values ([(preserves-determinism maybe-stack new-dp new-cc)
+                                  (let-values ([(imm-push imm-pop preserves-determinism maybe-stack new-dp new-cc)
                                                 (maybe-optimize-instruction possible-instr size dp cc stack)])
                                     (if (not (zero? color-value))
                                         ;; use the first nonzero instruction as the instruction
@@ -733,7 +740,7 @@
                                                    color-value
                                                    #f)]
                                        [possible-instr (compute-possible-instr codal new-codal)])
-                                  (let-values ([(preserves-determinism maybe-stack new-dp new-cc)
+                                  (let-values ([(imm-push imm-pop preserves-determinism maybe-stack new-dp new-cc)
                                                 (maybe-optimize-instruction possible-instr size dp cc stack)])
                                     (let ([new-exps (loop (car new-xy) (cdr new-xy)
                                                          new-dp new-cc codal
@@ -960,7 +967,7 @@
                                                 [(? prompts-value?) (list (string->symbol "(printf \" ? \")"))]
                                                 [_ (list)])
                                             (let-values
-                                                ([(dp cc stack) (,instr dp cc ,size stack)])
+                                                ([(dp cc stack) (,instr ,dp ,cc ,size stack)])
                                               (begin
                                                 ,(string->symbol "(printf \"\\n\")")
                                                 ,exps^)))
@@ -969,7 +976,11 @@
                               match-exps))))))
                (define defs
                  (cons `(define (,block-name dp cc stack)
-                          (let loop ([dp dp] [cc cc] [i 0])
+                          (block-loop dp cc stack
+                                      (match (list dp cc)
+                                        ,@match-exps
+                                        [_ 'return]))
+                          #;(let loop ([dp dp] [cc cc] [i 0])
                             (when (< i 8)
                               (begin
                                 (if (eqv?
@@ -992,6 +1003,257 @@
                              [stack (list 0)])
                          ,exps))))))
 
+  (define def-table (make-hash))
+  (define (init-env) '())
+  (define (extend-env env x v) (cons (cons x v) env))
+  (define (lookup env x)
+    (define pair (assv x env))
+    (if pair (cdr pair) (error 'lookup "value for id ~a not found" x)))
+  (define (list=? a b)
+    (match (list a b)
+      [`(,x ,y) #:when (eqv? x y) #t]
+      [`(() ()) #t]
+      [`((,x . ,xs) (,y . ,ys))
+       #:when (list=? x y)
+       (list=? xs ys)]
+      [_ #f]))
+  (define (assv-list v l)
+    (match l
+      ['() #f]
+      [`((,x . ,val) . ,more)
+       (if (list=? v x) (cons x val) (assv-list v more))]))
+
+  (define (constant? e)
+    (match e
+      [(? number?) #t]
+      [`(void) #t]
+      [`',x #t]
+      [`(list ,xs ...)
+       #:when (andmap constant? xs)
+       #t]
+      [_ #f]))
+
+  (define (constant->value c)
+    (match c
+      [(? number?) c]
+      [`(void) (void)]
+      [`',x x]
+      [`(list ,xs ...)
+       (foldr cons '() (map constant->value xs))]
+      [_ `',c]))
+
+  (define (value->constant v)
+    (match v
+      [(? number?) v]
+      [(? void?) `(void)]
+      [`(,xs ...)
+       `(list ,@(foldr cons '() (map value->constant xs)))]
+      [_ `',v]))
+
+  (define keywords
+    (set 'noop '+s '/s '>s 'dup 'push
+         '-s '%s 'pointer 'rolls 'pop
+         '*s 'nots 'switch))
+  (define se-keywords
+    (set 'in-char 'out-char 'in-num 'out-num))
+
+  (define (keyword->func kw)
+    (match kw
+      ['noop noop]
+      ['+s +s]
+      ['/s /s]
+      ['>s >s]
+      ['dup dup]
+      ['push push]
+      ['-s -s]
+      ['%s %s]
+      ['pointer pointer]
+      ['rolls rolls]
+      ['pop pop]
+      ['*s *s]
+      ['nots nots]
+      ['switch switch]))
+
+  (define max-depth 5)
+  (define (do-restrained-inlining e env g-env)
+    (define (recur x) (do-restrained-inlining x env g-env))
+    (define (keyword? kw) (set-member? keywords kw))
+    (match e
+      [(? symbol?) (lookup env e)]
+      [(? number?) e]
+      [`(void) `(void)]
+      [`',x e]
+      [`(,(? keyword? op) ,(app recur es) ...)
+       #:when (andmap constant? es)
+       (define-values (dp cc stack) (apply (keyword->func op)
+                                           (map constant->value es)))
+       `(values ,(value->constant dp)
+                ,(value->constant cc)
+                ,(value->constant stack))]
+      [`(,op ,es ...)
+       #:when (or (set-member? keywords op)
+                  (set-member? se-keywords op))
+       `(,op ,@(map recur es))]
+      [`(begin ,(app recur xs) ...) `(begin ,@xs)]
+      [`(printf . ,xs) `(printf ,@xs)]
+      [`(list ,(app recur xs) ...) `(list ,@xs)]
+      [`(block-loop ,dp ,cc ,stack ,b)
+       (if (and (constant? (recur dp)) (constant? (recur cc)))
+           (recur b)
+           `(block-loop ,(recur dp) ,(recur cc) ,(recur stack) ,(recur b)))]
+      [`(match ,(app recur l) ,clauses ...)
+       #:when (constant? l)
+       (define l^ (constant->value l))
+       (define clauses^ (map (λ (xy) (cons (constant->value (car xy)) (cadr xy))) clauses))
+       (define l-result (assv-list l^ clauses^))
+       (if l-result (recur (cdr l-result)) ''return)]
+      [`(match ,(app recur l) ,clauses ...)
+       `(match ,l ,@(map (λ (xy) `[,(car xy) ,(recur (cadr xy))]) clauses))]
+      [`(let ([,xs ,(app recur vs)] ...) ,b)
+       (define non-reducible
+         (for/fold ([res '()])
+                   ([x xs]
+                    [v vs])
+           (if (or (symbol? v) (constant? v)) res (cons (cons x v) res))))
+       (define constant-fold-env
+         (for/fold ([env env])
+                   ([x xs]
+                    [v vs])
+           (if (constant? v) (extend-env env x v) env)))
+       (define copy-prop-env
+         (for/fold ([env constant-fold-env])
+                   ([x xs]
+                    [v vs])
+           (if (symbol? v) (extend-env env x (lookup env v)) env)))
+       (define new-env
+         (for/fold ([env copy-prop-env])
+                   ([xv non-reducible])
+           (extend-env env (car xv) (car xv))))
+       (if (empty? non-reducible)
+           (do-restrained-inlining b new-env g-env)
+           `(let-values ([,(map car non-reducible)
+                          (values ,@(map cdr non-reducible))])
+              ,(do-restrained-inlining b new-env g-env)))]
+      [`(let-values ([,xs ,(app recur vs)]) ,b)
+       (match vs
+         [`(out-num ,_ ,_ ,_ ,(? constant? stack))
+          (define stack- (constant->value stack))
+          (define new-b (do-restrained-inlining
+                         b
+                         (extend-env env 'stack (value->constant (cdr stack-))) g-env))
+          (define reduced `(printf "~a" ,(car stack-)))
+          (match new-b
+            [_ `(begin ,reduced ,new-b)])]
+         [`(out-char ,_ ,_ ,_ ,(? constant? stack))
+          (define stack- (constant->value stack))
+          (define new-b (do-restrained-inlining
+                         b
+                         (extend-env env 'stack (value->constant (cdr stack-))) g-env))
+          (define reduced `(printf "~a" ,(integer->char (car stack-))))
+          (match new-b
+            [_ `(begin ,reduced ,new-b)])]
+         [`(values . ,vs)
+          (recur
+              (for/fold ([res b])
+                        ([x xs] [v vs])
+                `(let ([,x ,v]) ,res)))]
+         [_
+          (define new-env (for/fold ([env env]) ([x xs]) (extend-env env x x)))
+          `(let-values ([,xs ,vs]) ,(do-restrained-inlining b new-env g-env))])]
+      [`(,rator ,(app recur rands) ...)
+       (define depth (hash-ref def-table rator 0))
+       #;`(,rator ,@rands)
+       (if (> depth max-depth)
+           `(,rator ,@rands)
+           (begin
+             (hash-set! def-table rator (add1 depth))
+             (let ([inlined (inline-app rator rands env g-env)])
+               (define new-depth (hash-ref def-table rator))
+               (when (zero? depth) (hash-set! def-table rator depth))
+               (if (>= new-depth max-depth)
+                   `(,rator ,@rands)
+                   inlined))))]))
+
+  (define (inline-app rator rands env g-env)
+    (define def (assv rator g-env))
+    (unless def (error 'inline-app "global definition ~a not found" rator))
+    (match (cdr def)
+      [`(,xs ,b)
+       (define new-env (append (map cons xs rands) env))
+       (do-restrained-inlining b new-env g-env)]))
+  
+  (define (do-restrained-inlining-def d env g-env)
+    (match d
+      [`(define (,name ,xs ...) ,b)
+       (define new-env (append (map cons xs xs) env))
+       `(define (,name ,@xs) ,b)]))
+  
+  (define (make-global-env defs)
+    (match defs
+      [`() (values '() '())]
+      [`((define (,name ,xs ...) ,b) ,more ...)
+       (define-values (subenv subgenv) (make-global-env more))
+       (values (extend-env subenv name name)
+               (cons `(,name ,xs ,b) subgenv))]))
+
+  ;; pass 3
+  (define (restrained-inlining e)
+    (match e
+      [`(,defs ... ,e)
+       (define-values (env g-env) (make-global-env defs))
+       (append
+        (map (λ (x) (begin (set! def-table (make-hash))
+                           (do-restrained-inlining-def x env g-env)))
+             defs)
+        (list (begin (set! def-table (make-hash))
+                     (do-restrained-inlining e env g-env))))]))
+
+  (define (get-function-calls e defs)
+    
+    (let ([calls (set)])
+      (let ([base-result
+             (let recur ([e e])
+               (match e
+                 [(? symbol?) (set)]
+                 [(? number?) (set)]
+                 [`(void) (set)]
+                 [`',x (set)]
+                 [`(,op ,es ...)
+                  #:when (or (set-member? keywords op)
+                             (set-member? se-keywords op))
+                  (foldr set-union (set) (map recur es))]
+                 [`(begin ,(app recur xs) ...) (foldr set-union (set) xs)]
+                 [`(printf . ,xs) (set)]
+                 [`(list ,(app recur xs) ...) (foldr set-union (set) xs)]
+                 [`(block-loop ,dp ,cc ,stack ,(app recur b)) b]
+                 [`(match ,l ,clauses ...)
+                  (foldr (λ (xy almost) (set-union (recur (cadr xy)) almost)) (set) clauses)]
+                 [`(let ([,xs ,(app recur vs)] ...) ,(app recur b))
+                  (set-union b (foldr set-union (set) vs))]
+                 [`(let-values ([,xs ,(app recur vs)]) ,(app recur b))
+                  (set-union b vs)]
+                 [`(,rator ,(app recur rands) ...)
+                  (if (set-member? calls rator) (set)
+                      (match (assv rator defs)
+                        [`(,name ,xs ,b)
+                         (set! calls (set-add calls name))
+                         (recur b)]))]))])
+        (set-union base-result calls))))
+  
+  ;; pass 4
+  (define (remove-unnecessary-defs e)
+    (match e
+      [`(,defs ... ,e)
+       (define-values (env g-env) (make-global-env defs))
+       (define calls (get-function-calls e g-env))
+       `(,@(filter
+            (λ (d)
+              (match d
+                [`(define (,name ,xs ...) ,b)
+                 (set-member? calls name)]))
+            defs)
+         ,e)]))
+
   ;; shrink an image by an influence of 1/codal-size
   (define (with-codal-size size img)
     (let ([img-hash (image->hash img)]
@@ -1007,7 +1269,92 @@
                    #:when (zero? (modulo y size)))
          (hash-ref img-hash (xy->idx x y width height)))
        (divide-size width)
-       (divide-size height)))))
+       (divide-size height))))
+
+  (define (noop dp cc imm stack)
+    (values dp cc stack))
+
+  (define (+s dp cc imm stack)
+    (match stack
+      [`(,a ,b . ,rest) (values dp cc (cons (+ b a) rest))]))
+
+  (define (/s dp cc imm stack)
+    (match stack
+      [`(,a ,b . ,rest)
+       (define rem (modulo b a))
+       (values dp cc
+               (cons (if (zero? rem)
+                         (/ b a)
+                         (/ (- b rem) a))
+                     rest))]))
+
+  (define (>s dp cc imm stack)
+    (match stack
+      [`(,a ,b . ,rest) (values dp cc (cons (if (> b a) 1 0) rest))]))
+
+  (define (dup dp cc imm stack)
+    (match stack
+      [`(,a . ,rest) (values dp cc (cons a (cons a rest)))]))
+
+  (define (in-char dp cc imm stack)
+    (values dp cc (cons
+                   (char->integer
+                    (string-ref (format "~a" (read)) 0))
+                   stack)))
+
+  (define (push dp cc imm stack)
+    (values dp cc (cons imm stack)))
+
+  (define (-s dp cc imm stack)
+    (match stack
+      [`(,a ,b . ,rest) (values dp cc (cons (- b a) rest))]))
+
+  (define (%s dp cc imm stack)
+    (match stack
+      [`(,a ,b . ,rest) (values dp cc (cons (modulo b a) rest))]))
+
+  (define (pointer dp cc imm stack)
+    (match stack
+      [`(,a . ,rest) (values (modulo (+ a dp) 4) cc rest)]))
+
+  (define (rolls dp cc imm stack)
+    (match stack
+      [`(,n ,d . ,rest) (values dp cc (roll rest n d))]))
+
+  (define (out-num dp cc imm stack)
+    (match stack
+      [`(,a . ,rest)
+       (printf "~a" a)
+       (values dp cc rest)]))
+
+  (define (pop dp cc imm stack)
+    (match stack
+      [`(,a . ,rest) (values dp cc rest)]))
+
+  (define (*s dp cc imm stack)
+    (match stack
+      [`(,a ,b . ,rest) (values dp cc (cons (* b a) rest))]))
+
+  (define (nots dp cc imm stack)
+    (match stack
+      [`(,a . ,rest) (values dp cc (cons (if (eqv? a 0) 1 0) rest))]))
+
+  (define (switch dp cc imm stack)
+    (match stack
+      [`(,a . ,rest) (values dp (modulo (+ cc a) 2) rest)]))
+
+  (define (in-num dp cc imm stack)
+    (values dp cc (cons
+                   (match (read)
+                     [`,a #:when (integer? a) a]
+                     [`,a (error (format "not an integer: ~a" a))])
+                   stack)))
+
+  (define (out-char dp cc imm stack)
+    (match stack
+      [`(,a . ,rest)
+       (printf "~a" (integer->char a))
+       (values dp cc rest)])))
 
 (module reader racket
   (require 2htdp/image)
@@ -1052,114 +1399,44 @@
                 [(? image?)
                  ;; compile image
                  #;(define compiled-img (compile (with-codal-size codal-size x-datum)))
-                 (define compiled-img ((optimize-instr-list->racket #f)
-                                       (optimize-program->instr-list
-                                        (with-codal-size codal-size x-datum))))
+                 (define compiled-img (remove-unnecessary-defs
+                                       (restrained-inlining
+                                        ((optimize-instr-list->racket #f)
+                                         (optimize-program->instr-list
+                                          (with-codal-size codal-size x-datum))))))
                  (append compiled-img (loop codal-size #f))]
                 [_ (raise-syntax-error 'read-syntax "value given is not an image" #f #f (list x))])))))
-    #`(module whatever piet (#%module-begin #,@compiled)))
+    #`(module whatever racket-piet (#%module-begin #,@compiled)))
 
   (provide (rename-out [my-read-syntax read-syntax])))
 
-;; these functions are called by the code
-;; generated by the compiler
-
-;; ...
-(define (noop dp cc imm stack)
-  (values dp cc stack))
-
-(define (+s dp cc imm stack)
-  (match stack
-    [`(,a ,b . ,rest) (values dp cc (cons (+ b a) rest))]))
-
-(define (/s dp cc imm stack)
-  (match stack
-    [`(,a ,b . ,rest)
-     (define rem (modulo b a))
-     (values dp cc
-             (cons (if (zero? rem)
-                       (/ b a)
-                       (/ (- b rem) a))
-                   rest))]))
-
-(define (>s dp cc imm stack)
-  (match stack
-    [`(,a ,b . ,rest) (values dp cc (cons (if (> b a) 1 0) rest))]))
-
-(define (dup dp cc imm stack)
-  (match stack
-    [`(,a . ,rest) (values dp cc (cons a (cons a rest)))]))
-
-(define (in-char dp cc imm stack)
-  (values dp cc (cons
-                 (char->integer
-                  (string-ref (format "~a" (read)) 0))
-                 stack)))
-
-(define (push dp cc imm stack)
-  (values dp cc (cons imm stack)))
-
-(define (-s dp cc imm stack)
-  (match stack
-    [`(,a ,b . ,rest) (values dp cc (cons (- b a) rest))]))
-
-(define (%s dp cc imm stack)
-  (match stack
-    [`(,a ,b . ,rest) (values dp cc (cons (modulo b a) rest))]))
-
-(define (pointer dp cc imm stack)
-  (match stack
-    [`(,a . ,rest) (values (modulo (+ a dp) 4) cc rest)]))
-
-(define (roll stack num depth)
-    (let* ([sub (take stack depth)]
-           [m (modulo num depth)]
-           [idx (if (< m 0) (+ depth m) m)])
-      (append
-       (append (drop sub idx)
-               (take sub idx))
-       (drop stack depth))))
-
-(define (rolls dp cc imm stack)
-  (match stack
-    [`(,n ,d . ,rest) (values dp cc (roll rest n d))]))
-
-(define (out-num dp cc imm stack)
-  (match stack
-    [`(,a . ,rest)
-     (printf "~a" a)
-     (values dp cc rest)]))
-
-(define (pop dp cc imm stack)
-  (match stack
-    [`(,a . ,rest) (values dp cc rest)]))
-
-(define (*s dp cc imm stack)
-  (match stack
-    [`(,a ,b . ,rest) (values dp cc (cons (* b a) rest))]))
-
-(define (nots dp cc imm stack)
-  (match stack
-    [`(,a . ,rest) (values dp cc (cons (if (eqv? a 0) 1 0) rest))]))
-
-(define (switch dp cc imm stack)
-  (match stack
-    [`(,a . ,rest) (values dp (modulo (+ cc a) 2) rest)]))
-
-(define (in-num dp cc imm stack)
-  (values dp cc (cons
-                 (match (read)
-                   [`,a #:when (integer? a) a]
-                   [`,a (error (format "not an integer: ~a" a))])
-                 stack)))
-
-(define (out-char dp cc imm stack)
-  (match stack
-    [`(,a . ,rest)
-     (printf "~a" (integer->char a))
-     (values dp cc rest)]))
-
 (require (for-syntax syntax/parse))
+(define-syntax (block-loop stx)
+  (syntax-parse stx #:literals (match)
+    [(_ dp- cc- stack (match match-v match-es ...))
+     #'(let loop ([dp dp-] [cc cc-] [i 0])
+         (when (< i 8)
+           (begin (if (eqv?
+                       (match (list dp cc)
+                         match-es ...)
+                       'return)
+                      (if (even? i)
+                          (loop dp (modulo (add1 cc) 2) (add1 i))
+                          (loop (modulo (add1 dp) 4) cc (add1 i)))
+                      (void)))))]))
+#;
+(let loop ([dp dp] [cc cc] [i 0])
+                            (when (< i 8)
+                              (begin
+                                (if (eqv?
+                                     (match (list dp cc)
+                                       ,@match-exps
+                                       [_ 'return])
+                                     'return)
+                                    (if (even? i)
+                                        (loop dp (modulo (add1 cc) 2) (add1 i))
+                                        (loop (modulo (add1 dp) 4) cc (add1 i)))
+                                    (void)))))
 (require 'piet)
 ;; basic top-interaction support
 ;; (just use run-program to avoid complications)
@@ -1171,9 +1448,7 @@
     [(_ . e)
      #`(#%top-interaction . (run-program (with-codal-size 11 e)))]))
 
-(provide noop +s /s >s dup in-char
-         push -s %s pointer rolls
-         out-num pop *s nots switch
-         in-num out-char #%datum
+(provide #%datum
          (rename-out [ti #%top-interaction])
-         run-program with-codal-size)
+         run-program with-codal-size
+         block-loop)
